@@ -1,0 +1,11 @@
+{
+  "name": "support-dashboard-database",
+  "version": "1.0.0",
+  "description": "Database migration and import tools",
+  "scripts": {
+    "import": "node importCSV.js"
+  },
+  "dependencies": {
+    "csv-parse": "^5.5.3"
+  }
+}
