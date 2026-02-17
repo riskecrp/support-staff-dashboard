@@ -22,21 +22,23 @@ export default function Home() {
                 </p>
               </a>
               <a
-                href="/stats/entry"
-                className="block p-6 bg-green-50 rounded-lg hover:bg-green-100 transition"
-              >
-                <h3 className="text-lg font-semibold text-green-900">Stats Entry</h3>
-                <p className="mt-2 text-sm text-green-700">
-                  Enter monthly statistics for staff
-                </p>
-              </a>
-              <a
-                href="/stats/monthly"
+                href="/stats"
                 className="block p-6 bg-purple-50 rounded-lg hover:bg-purple-100 transition"
               >
                 <h3 className="text-lg font-semibold text-purple-900">Monthly Stats</h3>
                 <p className="mt-2 text-sm text-purple-700">
-                  View current month performance
+                  View current month performance with quotas
+                </p>
+              </a>
+              <a
+                href="https://github.com/riskecrp/support-staff-dashboard"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block p-6 bg-gray-50 rounded-lg hover:bg-gray-100 transition"
+              >
+                <h3 className="text-lg font-semibold text-gray-900">Documentation</h3>
+                <p className="mt-2 text-sm text-gray-700">
+                  API docs, setup guide, and migration info
                 </p>
               </a>
             </div>
