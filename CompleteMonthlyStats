@@ -1,0 +1,276 @@
+/**
+ * CompleteMonthlyStats.gs
+ *
+ * Compares the most recent month in AllStats to the prior month and writes month-over-month
+ * differences into:
+ * - Column I (9)  := difference of AllStats column F (6)  [TOTAL IG reports]
+ * - Column J (10) := difference of AllStats column G (7)  [TOTAL Forum reports]
+ * - Column K (11) := difference of AllStats column H (8)  [TOTAL Discord]
+ */
+
+function completeMonthlyStats() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var allSheet = ss.getSheetByName('AllStats');
+  if (!allSheet) {
+    ui.alert('AllStats sheet not found. Cannot complete monthly stats.');
+    return;
+  }
+
+  // Read AllStats data (read enough columns to access A..H and write I..K)
+  var lastRow = allSheet.getLastRow();
+  if (lastRow < 2) {
+    ui.alert('AllStats has no data rows.');
+    return;
+  }
+  // Read full rows A..H (8 columns) to gather dates, names, and totals
+  var data = allSheet.getRange(2, 1, lastRow - 1, 8).getValues(); 
+
+  // Build list of unique date entries with parsed keys (year*100 + month) when possible
+  var dateMap = {}; 
+  var uniqueDateOrder = []; 
+  for (var i = 0; i < data.length; i++) {
+    var rawDate = String(data[i][0] || '').trim();
+    if (rawDate === '') continue;
+    if (!dateMap.hasOwnProperty(rawDate)) {
+      dateMap[rawDate] = { raw: rawDate, rows: [], parsedKey: _parseYearMonthKey(rawDate) };
+      uniqueDateOrder.push(rawDate);
+    }
+    dateMap[rawDate].rows.push(i + 2); // actual sheet row number
+  }
+
+  // Collect distinct parsed keys to determine recency where possible
+  var parsedList = [];
+  for (var d in dateMap) {
+    if (dateMap[d].parsedKey !== null) {
+      parsedList.push({ raw: dateMap[d].raw, key: dateMap[d].parsedKey });
+    }
+  }
+
+  var thisDateRaw = null;
+  var prevDateRaw = null;
+
+  if (parsedList.length >= 2) {
+    // sort by key desc and pick top two (most recent)
+    parsedList.sort(function(a, b) { return b.key - a.key; });
+    thisDateRaw = parsedList[0].raw;
+    prevDateRaw = parsedList[1].raw;
+  } else {
+    // fallback: pick last two distinct unique date strings by appearance order
+    if (uniqueDateOrder.length >= 2) {
+      thisDateRaw = uniqueDateOrder[uniqueDateOrder.length - 1];
+      prevDateRaw = uniqueDateOrder[uniqueDateOrder.length - 2];
+    } else {
+      ui.alert('Not enough distinct months/dates found in AllStats to compare.');
+      return;
+    }
+  }
+
+  // Gather "this month" rows and "previous month" rows
+  var thisRows = dateMap[thisDateRaw] ? dateMap[thisDateRaw].rows.slice() : [];
+  var prevRows = dateMap[prevDateRaw] ? dateMap[prevDateRaw].rows.slice() : [];
+
+  if (!thisRows || thisRows.length === 0) {
+    ui.alert('No rows found for the most recent date: ' + thisDateRaw);
+    return;
+  }
+
+  // Build maps: normalizedName -> aggregated totals for the previous month
+  var aliasMap = _buildAliasMap(ss);
+
+  function toNum(v) {
+    var n = Number(v);
+    return (isNaN(n) ? 0 : n);
+  }
+
+  var prevMap = {}; // normalizedName -> { IG: n, Forum: n, Discord: n }
+  for (var pj = 0; pj < prevRows.length; pj++) {
+    var rowIndex = prevRows[pj];
+    var rowIdx0 = rowIndex - 2; // index into data[]
+    var name = String(data[rowIdx0][1] || '').trim(); // column B
+    if (!name) continue;
+    var norm = _normalizeName(name);
+    
+    // columns: F=6 -> index 5, G=7 -> index 6, H=8 -> index 7 in the data array
+    var ig = toNum(data[rowIdx0][5]);
+    var forum = toNum(data[rowIdx0][6]);
+    var discord = toNum(data[rowIdx0][7]);
+    
+    if (!prevMap[norm]) prevMap[norm] = { IG: 0, Forum: 0, Discord: 0 };
+    prevMap[norm].IG += ig;
+    prevMap[norm].Forum += forum;
+    prevMap[norm].Discord += discord;
+  }
+
+  // Apply aliasMap
+  var adjustedPrevMap = {};
+  for (var key in prevMap) {
+    if (!prevMap.hasOwnProperty(key)) continue;
+    var targetNorm = key;
+    if (aliasMap && aliasMap[key]) {
+      targetNorm = _followAlias(aliasMap, key);
+    }
+    if (!adjustedPrevMap[targetNorm]) adjustedPrevMap[targetNorm] = { IG: 0, Forum: 0, Discord: 0 };
+    adjustedPrevMap[targetNorm].IG += prevMap[key].IG;
+    adjustedPrevMap[targetNorm].Forum += prevMap[key].Forum;
+    adjustedPrevMap[targetNorm].Discord += prevMap[key].Discord;
+  }
+
+  var adjustedPrevKeys = Object.keys(adjustedPrevMap || {});
+
+  // Prepare diff arrays
+  var diffsIG = [];      // Column I
+  var diffsForum = [];   // Column J
+  var diffsDiscord = []; // Column K
+
+  for (var ti = 0; ti < thisRows.length; ti++) {
+    var sheetRow = thisRows[ti];
+    var idx0 = sheetRow - 2;
+    var nameThis = String(data[idx0][1] || '').trim();
+    var normThis = _normalizeName(nameThis);
+
+    var thisIG = toNum(data[idx0][5]);
+    var thisForum = toNum(data[idx0][6]);
+    var thisDiscord = toNum(data[idx0][7]);
+
+    // Find previous values
+    var prevVals = null;
+    if (adjustedPrevMap[normThis]) {
+      prevVals = adjustedPrevMap[normThis];
+    } else {
+      var bestKey = null;
+      var bestDist = Infinity;
+      for (var ak = 0; ak < adjustedPrevKeys.length; ak++) {
+        var candidate = adjustedPrevKeys[ak];
+        var dist = _levenshtein(candidate, normThis);
+        if (dist < bestDist) { bestDist = dist; bestKey = candidate; }
+      }
+      if (bestKey !== null) {
+        var lenMax = Math.max((bestKey || '').length, (normThis || '').length);
+        var relThreshold = Math.ceil(lenMax * 0.20);
+        var threshold = Math.min(2, relThreshold);
+        if (bestDist <= threshold) {
+          prevVals = adjustedPrevMap[bestKey];
+        }
+      }
+    }
+
+    var prevIG = prevVals ? toNum(prevVals.IG) : 0;
+    var prevForum = prevVals ? toNum(prevVals.Forum) : 0;
+    var prevDiscord = prevVals ? toNum(prevVals.Discord) : 0;
+
+    diffsIG.push([thisIG - prevIG]);
+    diffsForum.push([thisForum - prevForum]);
+    diffsDiscord.push([thisDiscord - prevDiscord]);
+  }
+
+  // Write diffs back into the sheet
+  // Columns I, J, K are contiguous (indices 9, 10, 11)
+  // We can write them in one block to be faster/cleaner
+  var outputBlock = [];
+  for (var i = 0; i < diffsIG.length; i++) {
+    outputBlock.push([ diffsIG[i][0], diffsForum[i][0], diffsDiscord[i][0] ]);
+  }
+
+  // Write to Column I (9) for 3 columns width
+  allSheet.getRange(thisRows[0], 9, thisRows.length, 3).setValues(outputBlock);
+
+  ui.alert('CompleteMonthlyStats complete.\nCompared "' + thisDateRaw + '" with "' + prevDateRaw + '".\nWrote differences to columns I (IG), J (Forum), and K (Discord).');
+}
+
+/* -----------------------
+   Helper functions below
+   ----------------------- */
+
+function _parseYearMonthKey(raw) {
+  if (!raw) return null;
+  var s = String(raw).trim();
+  var parts = s.split('-');
+  if (parts.length === 3) {
+    var y = Number(parts[0]);
+    var p1 = Number(parts[1]);
+    var p2 = Number(parts[2]);
+    if (!isNaN(y) && !isNaN(p1) && !isNaN(p2)) {
+      if (p2 >= 1 && p2 <= 12) return y * 100 + p2;
+      if (p1 >= 1 && p1 <= 12) return y * 100 + p1;
+    }
+  }
+  var d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    var yr = d.getFullYear();
+    var mo = d.getMonth() + 1;
+    return yr * 100 + mo;
+  }
+  return null;
+}
+
+function _buildAliasMap(ss) {
+  var map = {};
+  var logSheet = ss.getSheetByName('SupportChangesLog');
+  if (!logSheet) return map;
+  var lr = logSheet.getLastRow();
+  if (lr < 2) return map;
+  var vals = logSheet.getRange(2, 1, lr - 1, Math.max(4, logSheet.getLastColumn())).getValues();
+  for (var i = 0; i < vals.length; i++) {
+    var row = vals[i];
+    var action = String(row[2] || '').toLowerCase();
+    if (action.indexOf('change') !== -1 && action.indexOf('name') !== -1) {
+      var prior = String(row[1] || '').trim();
+      var details = String(row[3] || '').trim();
+      var newName = null;
+      var m = details.match(/newname\s*[:=]\s*(.+)/i);
+      if (m && m[1]) newName = m[1].trim();
+      else {
+        var m2 = details.match(/NewName:\s*(.+)/i);
+        if (m2 && m2[1]) newName = m2[1].trim();
+        else {
+          var idx = details.toLowerCase().indexOf('newname');
+          if (idx !== -1) newName = details.substring(idx + 7).replace(/[:=]/, '').trim();
+        }
+      }
+      if (prior && newName) {
+        var np = _normalizeName(prior);
+        var nn = _normalizeName(newName);
+        if (np && nn) map[np] = nn;
+      }
+    }
+  }
+  return map;
+}
+
+function _followAlias(aliasMap, key) {
+  var seen = {};
+  var cur = key;
+  while (aliasMap[cur] && !seen[cur]) {
+    seen[cur] = true;
+    cur = aliasMap[cur];
+  }
+  return cur;
+}
+
+function _normalizeName(n) {
+  if (n === null || n === undefined) return '';
+  var s = String(n);
+  s = s.replace(/~[^~]*~/g, ' ');
+  s = s.replace(/\([^)]*\)/g, ' ').replace(/\[[^\]]*\]/g, ' ');
+  s = s.replace(/[^a-zA-Z0-9\s]/g, ' ');
+  s = s.replace(/\s+/g, ' ').trim().toLowerCase();
+  return s;
+}
+
+function _levenshtein(a, b) {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+  var matrix = [];
+  var i, j;
+  for (i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (j = 0; j <= a.length; j++) matrix[0][j] = j;
+  for (i = 1; i <= b.length; i++) {
+    for (j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) matrix[i][j] = matrix[i - 1][j - 1];
+      else matrix[i][j] = Math.min(matrix[i - 1][j] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j - 1] + 1);
+    }
+  }
+  return matrix[b.length][a.length];
+}
