@@ -1,0 +1,146 @@
+/**
+ * RemoveSupport.gs
+ *
+ * Presents a modal dialog with a dropdown of alphabetized names from SSRoster (column A).
+ * When the user selects a name and confirms, the script sets column B ("Support") for that row to FALSE.
+ *
+ * Usage:
+ * - Call removeSupport() from the Support Management menu.
+ *
+ * Implementation notes:
+ * - Uses an HTML modal dialog so we can show a dropdown.
+ * - Server-side function removeSupportByName(name) performs the sheet update and returns a result message.
+ * - The dialog shows the result and closes.
+ */
+
+function removeSupport() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('SSRoster');
+  var ui = SpreadsheetApp.getUi();
+
+  if (!sheet) {
+    ui.alert('SSRoster sheet not found. There are no names to select.');
+    return;
+  }
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    ui.alert('No names found in SSRoster.');
+    return;
+  }
+
+  // Read names from column A (rows 2..lastRow)
+  var namesRange = sheet.getRange(2, 1, Math.max(0, lastRow - 1), 1);
+  var namesVals = namesRange.getValues();
+  var names = [];
+  for (var i = 0; i < namesVals.length; i++) {
+    var n = String(namesVals[i][0] || '').trim();
+    if (n) names.push(n);
+  }
+
+  if (names.length === 0) {
+    ui.alert('No names found in SSRoster.');
+    return;
+  }
+
+  // Remove duplicates and sort alphabetically (case-insensitive)
+  var unique = {};
+  var uniqueNames = [];
+  names.sort(function(a,b){
+    return a.toLowerCase().localeCompare(b.toLowerCase());
+  });
+  for (var j = 0; j < names.length; j++) {
+    var key = names[j].toLowerCase();
+    if (!unique[key]) {
+      unique[key] = true;
+      uniqueNames.push(names[j]);
+    }
+  }
+
+  // Build HTML dialog and pass the names array into it
+  var htmlTemplate = HtmlService.createHtmlOutput(
+    '<!DOCTYPE html>' +
+    '<html><head><base target="_top"></head><body>' +
+    '<div style="font-family: Arial, sans-serif; padding:12px;">' +
+    '<label for="nameSelect"><strong>Select name to remove from Support:</strong></label><br/>' +
+    '<select id="nameSelect" style="width:100%; margin-top:8px;">' +
+    '</select>' +
+    '<div style="margin-top:12px; text-align:right;">' +
+    '<button id="cancelBtn">Cancel</button> ' +
+    '<button id="removeBtn">Remove</button>' +
+    '</div>' +
+    '</div>' +
+    '<script>' +
+    '  var names = ' + JSON.stringify(uniqueNames) + ';' +
+    '  var select = document.getElementById("nameSelect");' +
+    '  for (var i=0;i<names.length;i++){' +
+    '    var opt = document.createElement("option"); opt.value = names[i]; opt.text = names[i]; select.appendChild(opt);' +
+    '  }' +
+    '  document.getElementById("cancelBtn").onclick = function(){ google.script.host.close(); };' +
+    '  document.getElementById("removeBtn").onclick = function(){' +
+    '    var sel = select.value;' +
+    '    if (!sel) { alert("Please select a name."); return; }' +
+    '    this.disabled = true;' +
+    '    google.script.run.withSuccessHandler(function(msg){ alert(msg); google.script.host.close(); }).removeSupportByName(sel);' +
+    '  };' +
+    '</script>' +
+    '</body></html>'
+  ).setWidth(420).setHeight(200);
+
+  ui.showModalDialog(htmlTemplate, 'Remove Support');
+}
+
+/**
+ * Server-side function called from the dialog.
+ * Finds the row with the given name (case-insensitive match) and sets column B to FALSE.
+ * Returns a message string describing the result.
+ */
+function removeSupportByName(name) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('SSRoster');
+  if (!sheet) return 'SSRoster sheet not found.';
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 'No names in SSRoster.';
+
+  var namesVals = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  var foundRow = -1;
+  for (var i = 0; i < namesVals.length; i++) {
+    var existing = String(namesVals[i][0] || '').trim();
+    if (existing && existing.toLowerCase() === name.toLowerCase()) {
+      foundRow = i + 2; // sheet row
+      break;
+    }
+  }
+
+  if (foundRow === -1) {
+    return 'Name "' + name + '" not found in SSRoster.';
+  }
+
+  // Optionally read prior value for log
+  var priorSupport = sheet.getRange(foundRow, 2).getValue();
+  // Set Support (col B) = FALSE
+  sheet.getRange(foundRow, 2).setValue(false);
+
+  // Optionally log the change to SupportChangesLog
+  try {
+    var logSheet = ss.getSheetByName('SupportChangesLog');
+    if (!logSheet) {
+      logSheet = ss.insertSheet('SupportChangesLog');
+      logSheet.appendRow(['Timestamp', 'Name', 'Action', 'PriorSupport', 'NewSupport']);
+    }
+    var row = [
+      new Date().toISOString(),
+      name,
+      'Removed (Support=FALSE)',
+      (priorSupport === true ? 'TRUE' : (priorSupport === false ? 'FALSE' : String(priorSupport))),
+      'FALSE'
+    ];
+    logSheet.getRange(logSheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+  } catch (e) {
+    // logging failure should not prevent success — ignore but include in response if needed
+    return 'Support set to FALSE for "' + name + '". (Note: failed to write to SupportChangesLog: ' + e.message + ')';
+  }
+
+  return 'Support set to FALSE for "' + name + '".';
+}
