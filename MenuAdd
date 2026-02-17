@@ -1,0 +1,33 @@
+/**
+ * SupportMenus.gs
+ *
+ * Builds the spreadsheet menus:
+ * - Support Management (existing items)
+ * - Report Monthly Stats (Prepare, Complete, Review)
+ * - Overall Stats (new top-level menu to open the overall Looker Studio dashboard)
+ *
+ * Replace your current SupportMenus.gs with this file and save.
+ */
+function onOpen(e) {
+  var ui = SpreadsheetApp.getUi();
+
+  ui.createMenu('Support Management')
+    .addItem('Add Support', 'addSupport')
+    .addItem('Remove Support', 'removeSupport')
+    .addItem('Promote Support', 'promoteSupport')
+    .addItem('Demote Support', 'demoteSupport')
+    .addItem('Change Support Alias', 'changeSupportAlias')
+    .addToUi();
+
+  ui.createMenu('Monthly Stats')
+    .addItem('Prepare Monthly Stats', 'prepareMonthlyStats')
+    .addItem('Complete Monthly Stats', 'completeMonthlyStats')
+    .addSeparator()
+    .addItem('Review Stats', 'showLookerSidebar')
+    .addToUi();
+
+  ui.createMenu('Overall Stats')
+    .addItem('Open Overall Dashboard (Sidebar)', 'showOverallSidebar')
+    .addItem('Open Overall Dashboard (Modal)', 'showOverallModal')
+    .addToUi();
+}
