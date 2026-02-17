@@ -266,7 +266,7 @@ npm run lint         # Run ESLint checks
 ## Important Notes
 
 - **Never hardcode database credentials** - use environment variables
-- **Never use SELECT *** - explicitly list columns needed
+- **Never use SELECT \*** - explicitly list columns needed
 - **Always validate user input** - use Zod schemas for API requests
 - **Test quota calculations** - ensure LOA adjustments work correctly
 - **Preserve audit trail** - log all significant changes
