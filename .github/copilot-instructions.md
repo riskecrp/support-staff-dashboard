@@ -211,7 +211,7 @@ npm run lint         # Run ESLint checks
 
 ### Important Columns
 - `is_active` - Soft delete flag (false = removed)
-- `is_senior` - Role flag (true = Senior Support, false = Support)
+- `is_senior_support` - Role flag (true = Senior Support, false = Support)
 - `loa_days` - Leave of absence days per month
 - `in_game_reports`, `forum_reports` - Activity counters
 
