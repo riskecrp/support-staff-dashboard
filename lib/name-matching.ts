@@ -82,7 +82,7 @@ export function findBestMatch(targetName: string, nameList: string[]): string | 
     }
   }
   
-  // Accept if within threshold (20% of longer string length, minimum 2)
+  // Accept if within threshold (20% of longer string length, capped at maximum 2)
   if (bestMatch !== null) {
     const lenMax = Math.max(bestMatch.length, targetName.length);
     const relThreshold = Math.ceil(lenMax * 0.20);
