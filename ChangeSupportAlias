@@ -1,0 +1,162 @@
+/**
+ * ChangeSupportAlias.gs
+ *
+ * - Shows a modal dialog with a server-populated dropdown of alphabetized unique names
+ *   from SSRoster (column A).
+ * - Lets the user type a new name/alias for the selected person.
+ * - On submit, updates column A for that person to the new text and logs the change
+ *   to SupportChangesLog.
+ *
+ * Usage:
+ * - Add this file to your Apps Script project, save and reload the spreadsheet,
+ *   then choose Support Management -> Change Support Alias.
+ */
+
+function changeSupportAlias() {
+  var names = _getSSRosterNames(); // server-side fetch & sort & dedupe
+
+  var optionsHtml = '';
+  if (names.length === 0) {
+    optionsHtml = '<option value="">No names available</option>';
+  } else {
+    for (var i = 0; i < names.length; i++) {
+      optionsHtml += '<option value="' + _escapeHtml(names[i]) + '">' + _escapeHtml(names[i]) + '</option>';
+    }
+  }
+
+  var html =
+    '<!DOCTYPE html><html><head><base target="_top"></head><body>' +
+    '<div style="font-family: Arial, sans-serif; padding:12px; max-width:520px;">' +
+    '<label for="nameSelect"><strong>Select name to change:</strong></label><br/>' +
+    '<select id="nameSelect" style="width:100%; margin-top:8px;">' + optionsHtml + '</select>' +
+    '<div style="margin-top:10px;"><label for="newName"><strong>New name / alias:</strong></label><br/>' +
+    '<input id="newName" type="text" style="width:100%; margin-top:6px;" /></div>' +
+    '<div style="margin-top:12px; text-align:right;">' +
+    '<button id="cancelBtn">Cancel</button> ' +
+    '<button id="changeBtn">Change</button>' +
+    '</div>' +
+    '<div id="status" style="margin-top:12px; color:#333; white-space:pre-wrap;"></div>' +
+    '</div>' +
+    '<script>' +
+    '  document.getElementById("cancelBtn").onclick = function(){ google.script.host.close(); };' +
+    '  document.getElementById("changeBtn").onclick = function(){' +
+    '    var sel = document.getElementById("nameSelect").value;' +
+    '    if(!sel){ alert("Please select a name."); return; }' +
+    '    var newName = document.getElementById("newName").value.trim();' +
+    '    if(!newName){ alert("Please enter the new name/alias."); return; }' +
+    '    this.disabled = true; document.getElementById("status").textContent = "Updating " + sel + " → " + newName + "...";' +
+    '    google.script.run.withSuccessHandler(function(msg){ alert(msg); google.script.host.close(); })' +
+    '      .withFailureHandler(function(err){ alert("Error: " + err.message); document.getElementById("changeBtn").disabled = false; document.getElementById("status").textContent = ""; })' +
+    '      .changeSupportAliasByName(sel, newName);' +
+    '  };' +
+    '</script>' +
+    '</body></html>';
+
+  var htmlOutput = HtmlService.createHtmlOutput(html).setWidth(520).setHeight(260);
+  SpreadsheetApp.getUi().showModalDialog(htmlOutput, 'Change Support Alias');
+}
+
+/* Server-side: return deduped, alphabetized list of names from SSRoster column A (rows 2..lastRow) */
+function _getSSRosterNames() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('SSRoster');
+  if (!sheet) {
+    // fallback: case-insensitive sheet name match
+    var sheets = ss.getSheets();
+    for (var i = 0; i < sheets.length; i++) {
+      var n = sheets[i].getName();
+      if (n && n.toLowerCase().replace(/\s+/g,'') === 'ssroster') {
+        sheet = sheets[i];
+        break;
+      }
+    }
+  }
+  if (!sheet) return [];
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  var vals = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  var names = [];
+  for (var j = 0; j < vals.length; j++) {
+    var n = String(vals[j][0] || '').trim();
+    if (n) names.push(n);
+  }
+  if (names.length === 0) return [];
+
+  names.sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
+  var seen = {};
+  var unique = [];
+  for (var k = 0; k < names.length; k++) {
+    var key = names[k].toLowerCase();
+    if (!seen[key]) { seen[key] = true; unique.push(names[k]); }
+  }
+  return unique;
+}
+
+/**
+ * Server-side: find the row matching oldName (case-insensitive) and set column A to newName.
+ * Appends a log row to SupportChangesLog. Returns a human-friendly message.
+ */
+function changeSupportAliasByName(oldName, newName) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('SSRoster');
+  if (!sheet) {
+    // fallback: case-insensitive sheet name match
+    var sheets = ss.getSheets();
+    for (var i = 0; i < sheets.length; i++) {
+      var n = sheets[i].getName();
+      if (n && n.toLowerCase().replace(/\s+/g,'') === 'ssroster') { sheet = sheets[i]; break; }
+    }
+  }
+  if (!sheet) return 'SSRoster sheet not found.';
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 'No names in SSRoster.';
+
+  var namesVals = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  var foundRow = -1;
+  for (var i = 0; i < namesVals.length; i++) {
+    var existing = String(namesVals[i][0] || '').trim();
+    if (existing && existing.toLowerCase() === String(oldName).toLowerCase()) {
+      foundRow = i + 2;
+      break;
+    }
+  }
+
+  if (foundRow === -1) return 'Name "' + oldName + '" not found in SSRoster.';
+
+  var priorName = sheet.getRange(foundRow, 1).getValue();
+  sheet.getRange(foundRow, 1).setValue(newName);
+
+  // Log the change
+  try {
+    var logSheet = ss.getSheetByName('SupportChangesLog');
+    if (!logSheet) {
+      logSheet = ss.insertSheet('SupportChangesLog');
+      logSheet.appendRow(['Timestamp', 'Name', 'Action', 'Details']);
+    }
+    var row = [
+      new Date().toISOString(),
+      priorName,
+      'Changed Name/Alias',
+      'NewName: ' + newName
+    ];
+    logSheet.getRange(logSheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+  } catch (e) {
+    // ignore logging failures
+  }
+
+  return 'Updated "' + priorName + '" → "' + newName + '".';
+}
+
+/* small utility to escape HTML when building option text */
+function _escapeHtml(text) {
+  if (text === null || text === undefined) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
