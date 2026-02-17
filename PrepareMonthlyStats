@@ -1,0 +1,272 @@
+/**
+ * PrepareMonthlyStats.gs (updated: tolerant ForumReports name matching)
+ *
+ * Behaviour:
+ * - Snapshot SSRoster (Name, Support, SeniorSupport).
+ * - Find next empty row on AllStats (lastRow + 1).
+ * - Prompt user for date in format YYYY-DD-MM (validates but allows override).
+ * - For each SSRoster row with Support === TRUE:
+ *     - Write Date -> AllStats Col A
+ *     - Write Name -> AllStats Col B
+ *     - Write SeniorSupport -> AllStats Col C
+ * - Read PanelData columns B (name), C (Quizzes Accepted), D (Quizzes Rejected), E (other)
+ *   and match names tolerant of surrounding notes; write C->AllStats D, D->AllStats E, E->AllStats F.
+ * - Read ForumReports column B and COUNT rows per staff using tolerant matching:
+ *     - Try exact normalized match first
+ *     - If not found, pick the forum name with the best Levenshtein distance to the normalized staff name
+ *       and accept it if the distance is within a small threshold (absolute or relative).
+ *     - Write the matched count to AllStats column G.
+ *
+ * Replace your existing PrepareMonthlyStats.gs with this file, save, reload the spreadsheet,
+ * then run Report Monthly Stats -> Prepare Monthly Stats.
+ */
+
+function prepareMonthlyStats() {
+  var ui = SpreadsheetApp.getUi();
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+
+  // 1) Read SSRoster snapshot
+  var ssSheet = ss.getSheetByName('SSRoster');
+  if (!ssSheet) {
+    ui.alert('SSRoster sheet not found. Cannot prepare monthly stats.');
+    return;
+  }
+  var ssLast = ssSheet.getLastRow();
+  var ssData = [];
+  if (ssLast >= 2) {
+    ssData = ssSheet.getRange(2, 1, ssLast - 1, 3).getValues(); // Name, Support, SeniorSupport
+  }
+
+  // Build list of support people (keep snapshot of names and senior flag)
+  var supports = [];
+  for (var i = 0; i < ssData.length; i++) {
+    var name = String(ssData[i][0] || '').trim();
+    var supportFlag = ssData[i][1];
+    var seniorFlag = ssData[i][2];
+    if (name && _toBool(supportFlag)) {
+      supports.push({
+        name: name,
+        senior: _toBool(seniorFlag)
+      });
+    }
+  }
+
+  if (supports.length === 0) {
+    ui.alert('No "Support" (TRUE) entries found in SSRoster. Nothing to write.');
+    return;
+  }
+
+  // 2) Prepare AllStats sheet and find next empty row
+  var allSheet = ss.getSheetByName('AllStats');
+  if (!allSheet) {
+    allSheet = ss.insertSheet('AllStats');
+  }
+  var allNextRow = Math.max(1, allSheet.getLastRow() + 1);
+
+  // 3) Prompt for date (YYYY-DD-MM requested). Validate but allow override.
+  var datePrompt = ui.prompt('Prepare Monthly Stats', 'Enter date in format YYYY-MM-DD (e.g. 2025-12-01):', ui.ButtonSet.OK_CANCEL);
+  if (datePrompt.getSelectedButton() !== ui.Button.OK) {
+    ui.alert('Operation cancelled.');
+    return;
+  }
+  var dateStr = datePrompt.getResponseText().trim();
+  var dateRe = /^\d{4}-\d{2}-\d{2}$/;
+  if (!dateRe.test(dateStr)) {
+    var cont = ui.alert('Date format mismatch', 'The entered date does not match YYYY-DD-MM. Continue anyway?', ui.ButtonSet.YES_NO);
+    if (cont !== ui.Button.YES) {
+      ui.alert('Operation cancelled.');
+      return;
+    }
+  }
+
+  // 4) Batch write initial columns A-C for all support rows
+  var rowsAC = [];
+  for (var r = 0; r < supports.length; r++) {
+    rowsAC.push([dateStr, supports[r].name, supports[r].senior === true]);
+  }
+  allSheet.getRange(allNextRow, 1, rowsAC.length, 3).setValues(rowsAC);
+
+  // 5) Read PanelData (columns B-E). Column B contains name (may have notes).
+  var panelSheet = ss.getSheetByName('PanelData');
+  var panelVals = [];
+  if (panelSheet) {
+    var pLast = panelSheet.getLastRow();
+    if (pLast >= 2) {
+      // Read cols B-E (2..5)
+      panelVals = panelSheet.getRange(2, 2, pLast - 1, 4).getValues();
+      // panelVals rows: [colB_name, colC_quizAccepted, colD_quizRejected, colE_other]
+    }
+  }
+
+  // 6) Read ForumReports column B and build normalized counts map
+  var forumSheet = ss.getSheetByName('ForumReports');
+  var forumVals = [];
+  if (forumSheet) {
+    var fLast = forumSheet.getLastRow();
+    if (fLast >= 2) {
+      // Read column B (names) for all data rows
+      forumVals = forumSheet.getRange(2, 2, fLast - 1, 1).getValues(); // single-column
+    }
+  }
+
+  // 7) Build panel index for matching (as before)
+  var panelIndex = [];
+  if (panelVals && panelVals.length > 0) {
+    for (var pi = 0; pi < panelVals.length; pi++) {
+      var raw = String(panelVals[pi][0] || '').trim();
+      var norm = _normalizeName(raw);
+      panelIndex.push({ raw: raw, norm: norm, vals: panelVals[pi] });
+    }
+  }
+
+  // 8) Build forumCounts: normalized name -> count of rows,
+  //    also keep the list of distinct normalized forum names for fuzzy matching
+  var forumCounts = {}; // key = normalized name, value = count
+  var forumNormList = []; // list of normalized forum names (unique)
+  if (forumVals && forumVals.length > 0) {
+    for (var fi = 0; fi < forumVals.length; fi++) {
+      var rawf = String(forumVals[fi][0] || '').trim();
+      if (!rawf) continue;
+      var normf = _normalizeName(rawf);
+      if (!normf) continue;
+      forumCounts[normf] = (forumCounts[normf] || 0) + 1;
+    }
+    // populate forumNormList
+    for (var key in forumCounts) {
+      if (forumCounts.hasOwnProperty(key)) forumNormList.push(key);
+    }
+  }
+
+  // 9) For each written AllStats row, try to find matching PanelData (tolerant) and ForumReports count (tolerant)
+  //    Build rowsDEFG array for columns D,E,F,G (G will be the count from forumCounts or best fuzzy match)
+  var rowsDEFG = [];
+  for (var s = 0; s < supports.length; s++) {
+    rowsDEFG.push(['', '', '', '']);
+  }
+
+  for (var s2 = 0; s2 < supports.length; s2++) {
+    var target = supports[s2].name;
+    var tnorm = _normalizeName(target);
+
+    // PanelData match (same tolerant logic as before)
+    var foundPanel = null;
+    if (panelIndex && panelIndex.length > 0) {
+      for (var m = 0; m < panelIndex.length; m++) {
+        if (panelIndex[m].norm === tnorm) { foundPanel = panelIndex[m]; break; }
+      }
+      if (!foundPanel) {
+        for (var m2 = 0; m2 < panelIndex.length; m2++) {
+          if (panelIndex[m2].norm && tnorm && (panelIndex[m2].norm.indexOf(tnorm) !== -1 || tnorm.indexOf(panelIndex[m2].norm) !== -1)) {
+            foundPanel = panelIndex[m2];
+            break;
+          }
+        }
+      }
+    }
+
+    var qa = '', qr = '', oe = '';
+    if (foundPanel) {
+      qa = foundPanel.vals[1] === undefined ? '' : foundPanel.vals[1]; // C -> AllStats D
+      qr = foundPanel.vals[2] === undefined ? '' : foundPanel.vals[2]; // D -> AllStats E
+      oe = foundPanel.vals[3] === undefined ? '' : foundPanel.vals[3]; // E -> AllStats F
+    }
+
+    // ForumReports tolerant match:
+    var forumCountVal = '';
+    if (forumNormList.length > 0) {
+      // 1) exact normalized match
+      if (tnorm && forumCounts[tnorm] !== undefined) {
+        forumCountVal = forumCounts[tnorm];
+      } else {
+        // 2) fuzzy: find the forum normalized name with the smallest Levenshtein distance
+        var bestKey = null;
+        var bestDist = Infinity;
+        for (var fk = 0; fk < forumNormList.length; fk++) {
+          var key = forumNormList[fk];
+          var dist = _levenshtein(key, tnorm);
+          if (dist < bestDist) {
+            bestDist = dist;
+            bestKey = key;
+          }
+        }
+        // Accept the fuzzy match only if within threshold:
+        // threshold = min(2, 20% of longer length rounded up)
+        if (bestKey !== null && bestDist !== Infinity) {
+          var lenMax = Math.max((bestKey || '').length, (tnorm || '').length);
+          var relThreshold = Math.ceil(lenMax * 0.20);
+          var threshold = Math.min(2, relThreshold);
+          if (bestDist <= threshold) {
+            forumCountVal = forumCounts[bestKey];
+          } else {
+            forumCountVal = '';
+          }
+        }
+      }
+    }
+
+    rowsDEFG[s2] = [qa, qr, oe, forumCountVal];
+  }
+
+  // 10) Write columns D-G in batch
+  allSheet.getRange(allNextRow, 4, rowsDEFG.length, 4).setValues(rowsDEFG);
+
+  ui.alert('PrepareMonthlyStats complete. Wrote ' + supports.length + ' row(s) to AllStats starting at row ' + allNextRow + '.');
+}
+
+/* ---- Helpers ---- */
+
+function _toBool(val) {
+  if (val === true) return true;
+  if (val === false) return false;
+  if (val === null || val === undefined || val === '') return false;
+  var s = String(val).trim().toLowerCase();
+  if (s === 'true' || s === 'yes' || s === 'y' || s === '1') return true;
+  return false;
+}
+
+function _normalizeName(n) {
+  if (n === null || n === undefined) return '';
+  var s = String(n);
+  // Remove content enclosed by tildes ~...~
+  s = s.replace(/~[^~]*~/g, ' ');
+  // Remove parentheses/brackets content
+  s = s.replace(/\([^)]*\)/g, ' ').replace(/\[[^\]]*\]/g, ' ');
+  // Remove punctuation except letters, numbers and spaces
+  s = s.replace(/[^a-zA-Z0-9\s]/g, ' ');
+  // Collapse whitespace and lowercase
+  s = s.replace(/\s+/g, ' ').trim().toLowerCase();
+  return s;
+}
+
+/**
+ * Levenshtein distance (classic DP).
+ * Returns integer >= 0. Works on normalized lowercase strings.
+ */
+function _levenshtein(a, b) {
+  if (a === b) return 0;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  var matrix = [];
+  var i, j;
+  for (i = 0; i <= b.length; i++) {
+    matrix[i] = [i];
+  }
+  for (j = 0; j <= a.length; j++) {
+    matrix[0][j] = j;
+  }
+  for (i = 1; i <= b.length; i++) {
+    for (j = 1; j <= a.length; j++) {
+      if (b.charAt(i - 1) === a.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j] + 1,    // deletion
+          matrix[i][j - 1] + 1,    // insertion
+          matrix[i - 1][j - 1] + 1 // substitution
+        );
+      }
+    }
+  }
+  return matrix[b.length][a.length];
+}
