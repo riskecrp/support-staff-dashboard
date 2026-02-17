@@ -1,0 +1,177 @@
+/**
+ * Revised AddSupport.gs — safer handling to avoid header re-insertion or data loss,
+ * more robust search/update logic, and clearer logging.
+ */
+
+function addSupport() {
+  var ui = SpreadsheetApp.getUi();
+  var sheet = _getSSRosterSheet(); // ensures sheet exists and header is present
+  var sessionChanges = [];
+
+  while (true) {
+    var nameResp = ui.prompt('Add Support', 'Enter staff full name (Cancel to finish):', ui.ButtonSet.OK_CANCEL);
+    if (nameResp.getSelectedButton() !== ui.Button.OK) {
+      break; // user cancelled or closed prompt -> finish
+    }
+    var name = nameResp.getResponseText().trim();
+    if (!name) {
+      ui.alert('Name is required. Please enter a name or Cancel to finish.');
+      continue;
+    }
+
+    // Refresh data each loop and search only data rows (rows 2..lastRow)
+    var lastRow = sheet.getLastRow();
+    var foundRow = -1;
+    if (lastRow >= 2) {
+      var namesRange = sheet.getRange(2, 1, lastRow - 1, 1);
+      var namesVals = namesRange.getValues();
+      for (var i = 0; i < namesVals.length; i++) {
+        var existing = String(namesVals[i][0] || '').trim();
+        if (existing && existing.toLowerCase() === name.toLowerCase()) {
+          foundRow = i + 2; // account for header row
+          break;
+        }
+      }
+    }
+
+    if (foundRow !== -1) {
+      // existing person: read prior SeniorSupport value
+      var priorSeniorVal = sheet.getRange(foundRow, 3).getValue();
+      var priorSenior = _toBool(priorSeniorVal);
+
+      // Set Support (col B) = TRUE
+      sheet.getRange(foundRow, 2).setValue(true);
+
+      var newSenior;
+      if (priorSenior) {
+        // if previously true, confirm reinstatement
+        var confirm = ui.alert(
+          'Senior Support Confirmation',
+          name + ' is currently marked as Senior Support. Are you reinstating them as Senior Support?',
+          ui.ButtonSet.YES_NO
+        );
+        if (confirm === ui.Button.YES) {
+          sheet.getRange(foundRow, 3).setValue(true);
+          newSenior = true;
+        } else {
+          sheet.getRange(foundRow, 3).setValue(false);
+          newSenior = false;
+        }
+      } else {
+        // ensure SeniorSupport is FALSE
+        sheet.getRange(foundRow, 3).setValue(false);
+        newSenior = false;
+      }
+
+      sessionChanges.push({
+        timestamp: new Date(),
+        name: name,
+        action: 'Updated existing (Support=TRUE)',
+        priorSenior: (priorSenior === null ? null : priorSenior),
+        newSenior: newSenior
+      });
+
+      ui.alert('Updated existing staff: ' + name);
+    } else {
+      // name not found — append new row (ensures header exists so append is safe)
+      sheet.appendRow([name, true, false]);
+      sessionChanges.push({
+        timestamp: new Date(),
+        name: name,
+        action: 'Added new (Support=TRUE, SeniorSupport=FALSE)',
+        priorSenior: null,
+        newSenior: false
+      });
+      ui.alert('Added new staff to SSRoster: ' + name);
+    }
+
+    var again = ui.alert('Add Another?', 'Do you want to add another support member?', ui.ButtonSet.YES_NO);
+    if (again !== ui.Button.YES) {
+      break;
+    }
+  } // end while
+
+  if (sessionChanges.length > 0) {
+    var documented = _documentSessionChanges(sessionChanges);
+    ui.alert('Session complete. Documented ' + documented + ' change(s) to the "SupportChangesLog" sheet.');
+  } else {
+    ui.alert('No changes were made.');
+  }
+}
+
+/* ---- Helpers local to AddSupport.gs ---- */
+
+function _toBool(val) {
+  if (val === true) return true;
+  if (val === false) return false;
+  if (val === null || val === undefined || val === '') return false;
+  var s = String(val).trim().toLowerCase();
+  if (s === 'true' || s === 'yes' || s === 'y' || s === '1') return true;
+  return false;
+}
+
+/**
+ * Ensures SSRoster sheet exists and that the first row is the header:
+ * ['Name','Support','SeniorSupport'].
+ *
+ * Behavior:
+ * - If the spreadsheet has no SSRoster sheet, create it and write the header.
+ * - If the first row already looks like a header (first cell equals 'Name' case-insensitive),
+ *   ensure the header cells are set to the canonical labels (will overwrite header row).
+ * - If the first row does NOT look like a header (it looks like data), insert a header row above it.
+ *
+ * This avoids repeatedly inserting headers in ways that shift or overwrite data unexpectedly.
+ */
+function _getSSRosterSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('SSRoster');
+  if (!sheet) {
+    sheet = ss.insertSheet('SSRoster');
+    sheet.appendRow(['Name', 'Support', 'SeniorSupport']);
+    return sheet;
+  }
+
+  // Read the first row (ensure at least 3 columns are read)
+  var headerRange = sheet.getRange(1, 1, 1, 3);
+  var header = headerRange.getValues()[0];
+
+  var firstCell = String(header[0] || '').trim();
+  var isHeader = firstCell.toLowerCase() === 'name';
+
+  if (isHeader) {
+    // Overwrite header row with canonical labels to normalize variations (safe)
+    sheet.getRange(1, 1, 1, 3).setValues([['Name', 'Support', 'SeniorSupport']]);
+  } else {
+    // First row looks like data — insert a header row to preserve existing data
+    sheet.insertRowBefore(1);
+    sheet.getRange(1, 1, 1, 3).setValues([['Name', 'Support', 'SeniorSupport']]);
+  }
+  return sheet;
+}
+
+/**
+ * Append session changes to SupportChangesLog without overwriting unrelated data.
+ * Each change becomes a single new row below existing content.
+ */
+function _documentSessionChanges(changes) {
+  if (!changes || changes.length === 0) return 0;
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var logSheet = ss.getSheetByName('SupportChangesLog');
+  if (!logSheet) {
+    logSheet = ss.insertSheet('SupportChangesLog');
+    logSheet.appendRow(['Timestamp', 'Name', 'Action', 'PriorSenior', 'NewSenior']);
+  }
+  var rows = changes.map(function(chg) {
+    return [
+      chg.timestamp.toISOString(),
+      chg.name,
+      chg.action,
+      (chg.priorSenior === null ? '' : (chg.priorSenior ? 'TRUE' : 'FALSE')),
+      (chg.newSenior === null ? '' : (chg.newSenior ? 'TRUE' : 'FALSE'))
+    ];
+  });
+  // Append rows safely
+  var startRow = logSheet.getLastRow() + 1;
+  logSheet.getRange(startRow, 1, rows.length, rows[0].length).setValues(rows);
+  return rows.length;
+}
