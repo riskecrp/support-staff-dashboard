@@ -1,0 +1,172 @@
+/**
+ * PromoteSupport.gs (server-embedded options — robust)
+ *
+ * Builds the dropdown server-side (no google.script.run name-fetch on client),
+ * which avoids timing/sandbox issues that can leave the select stuck on "Loading".
+ *
+ * Usage:
+ * - Replace existing PromoteSupport.gs with this file, Save, reload the spreadsheet,
+ *   then run Support Management -> Promote Support.
+ *
+ * UX:
+ * - Single modal dialog showing a populated dropdown of alphabetized unique names.
+ * - Select a name and click "Promote".
+ * - Server sets column C ("SeniorSupport") = TRUE and appends a log row.
+ * - After success a single confirm asks "Promote another?" If yes, the selected name
+ *   is removed from the dropdown; if no the dialog closes.
+ */
+
+function promoteSupport() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var names = _getSSRosterNames(); // server-side fetch & sort & dedupe
+
+  // Build options HTML safely
+  var optionsHtml = '';
+  if (names.length === 0) {
+    optionsHtml = '<option value="">No names available</option>';
+  } else {
+    for (var i = 0; i < names.length; i++) {
+      optionsHtml += '<option value="' + _escapeHtml(names[i]) + '">' + _escapeHtml(names[i]) + '</option>';
+    }
+  }
+
+  var html =
+    '<!DOCTYPE html><html><head><base target="_top"></head><body>' +
+    '<div style="font-family: Arial, sans-serif; padding:12px; max-width:520px;">' +
+    '<label for="nameSelect"><strong>Select name to promote to Senior Support:</strong></label><br/>' +
+    '<select id="nameSelect" style="width:100%; margin-top:8px;">' +
+    optionsHtml +
+    '</select>' +
+    '<div style="margin-top:12px; text-align:right;">' +
+    '<button id="cancelBtn">Cancel</button> ' +
+    '<button id="promoteBtn">Promote</button>' +
+    '</div>' +
+    '<div id="status" style="margin-top:12px; color:#333; white-space:pre-wrap;"></div>' +
+    '</div>' +
+    '<script>' +
+    '  var names = ' + JSON.stringify(names) + ';' +
+    '  function removeName(n){ var i = names.indexOf(n); if(i>-1) names.splice(i,1); var sel = document.getElementById("nameSelect"); sel.remove(sel.selectedIndex); }' +
+    '  document.getElementById("cancelBtn").onclick = function(){ google.script.host.close(); };' +
+    '  document.getElementById("promoteBtn").onclick = function(){' +
+    '    var sel = document.getElementById("nameSelect").value; if(!sel){ alert("Please select a name."); return; }' +
+    '    this.disabled = true; document.getElementById("status").textContent = "Promoting " + sel + "...";' +
+    '    google.script.run.withSuccessHandler(function(msg){' +
+    '      var again = confirm(msg + "\\n\\nPromote another?");' +
+    '      if (again) {' +
+    '        removeName(sel);' +
+    '        if(names.length === 0){ alert("No more names available."); google.script.host.close(); return; }' +
+    '        document.getElementById("status").textContent = ""; document.getElementById("promoteBtn").disabled = false;' +
+    '      } else {' +
+    '        google.script.host.close();' +
+    '      }' +
+    '    }).withFailureHandler(function(err){ alert("Error promoting: " + err.message); document.getElementById("promoteBtn").disabled = false; document.getElementById("status").textContent = ""; }).promoteSupportByName(sel);' +
+    '  };' +
+    '</script>' +
+    '</body></html>';
+
+  var htmlOutput = HtmlService.createHtmlOutput(html).setWidth(520).setHeight(260);
+  SpreadsheetApp.getUi().showModalDialog(htmlOutput, 'Promote Support');
+}
+
+/* Server-side helper: read SSRoster column A (rows 2..lastRow), dedupe case-insensitive and sort */
+function _getSSRosterNames() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('SSRoster');
+  if (!sheet) {
+    // try case-insensitive fallback for sheet name
+    var sheets = ss.getSheets();
+    for (var i = 0; i < sheets.length; i++) {
+      if (sheets[i].getName() && sheets[i].getName().toLowerCase().replace(/\s+/g,'') === 'ssroster') {
+        sheet = sheets[i];
+        break;
+      }
+    }
+  }
+  if (!sheet) return [];
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return [];
+
+  var vals = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  var names = [];
+  for (var j = 0; j < vals.length; j++) {
+    var n = String(vals[j][0] || '').trim();
+    if (n) names.push(n);
+  }
+  if (names.length === 0) return [];
+
+  // sort and dedupe (case-insensitive), keep first-case occurrence
+  names.sort(function(a,b){ return a.toLowerCase().localeCompare(b.toLowerCase()); });
+  var seen = {};
+  var unique = [];
+  for (var k = 0; k < names.length; k++) {
+    var key = names[k].toLowerCase();
+    if (!seen[key]) { seen[key] = true; unique.push(names[k]); }
+  }
+  return unique;
+}
+
+/* Promote action: set column C to TRUE for the row matching name (case-insensitive) and log */
+function promoteSupportByName(name) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = ss.getSheetByName('SSRoster');
+  if (!sheet) {
+    var sheets = ss.getSheets();
+    for (var i = 0; i < sheets.length; i++) {
+      if (sheets[i].getName() && sheets[i].getName().toLowerCase().replace(/\s+/g,'') === 'ssroster') {
+        sheet = sheets[i];
+        break;
+      }
+    }
+  }
+  if (!sheet) return 'SSRoster sheet not found.';
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 'No names in SSRoster.';
+
+  var namesVals = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  var foundRow = -1;
+  for (var i = 0; i < namesVals.length; i++) {
+    var existing = String(namesVals[i][0] || '').trim();
+    if (existing && existing.toLowerCase() === name.toLowerCase()) {
+      foundRow = i + 2;
+      break;
+    }
+  }
+  if (foundRow === -1) return 'Name "' + name + '" not found in SSRoster.';
+
+  var priorSenior = sheet.getRange(foundRow, 3).getValue();
+  sheet.getRange(foundRow, 3).setValue(true);
+
+  // Append to SupportChangesLog (non-fatal on failure)
+  try {
+    var logSheet = ss.getSheetByName('SupportChangesLog');
+    if (!logSheet) {
+      logSheet = ss.insertSheet('SupportChangesLog');
+      logSheet.appendRow(['Timestamp', 'Name', 'Action', 'PriorSenior', 'NewSenior']);
+    }
+    var row = [
+      new Date().toISOString(),
+      name,
+      'Promoted to SeniorSupport (SeniorSupport=TRUE)',
+      (priorSenior === true ? 'TRUE' : (priorSenior === false ? 'FALSE' : String(priorSenior))),
+      'TRUE'
+    ];
+    logSheet.getRange(logSheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
+  } catch (e) {
+    // ignore logging failure
+  }
+
+  return 'SeniorSupport set to TRUE for "' + name + '".';
+}
+
+/* very small utility to escape HTML when building option text */
+function _escapeHtml(text) {
+  if (text === null || text === undefined) return '';
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
